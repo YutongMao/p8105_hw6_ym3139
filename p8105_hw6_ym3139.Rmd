@@ -270,3 +270,170 @@ The bootstrap distribution of R-squared is very concentrated, and the 95% bootst
 consistently explains a large proportion of the variability in `tmax`, and that the goodness-of-fit is quite stable across resamples.
 
 In contrast, the bootstrap distribution of the ratio β̂₁ / β̂₂ is much more dispersed and lies entirely on the negative side, with a 95% confidence interval roughly between -280 and -125. This suggests that the coefficients for `tmin` and `prcp` tend to have opposite signs, and there is substantial uncertainty in the magnitude of their ratio. The bootstrap results therefore show high precision for R-squared but considerably greater uncertainty for the coefficient ratio.
+
+
+# Problem 3
+
+```{r}
+# Read raw data (put the csv file in your `data/` folder)
+birth_df_raw =
+  read_csv("data/birthweight.csv")
+
+# Clean data for regression analysis
+birth_df =
+  birth_df_raw |>
+  mutate(
+    # Convert binary / categorical variables to factors
+    babysex  = factor(babysex,  levels = c(1, 2),
+                      labels = c("male", "female")),
+    malform  = factor(malform, levels = c(0, 1),
+                      labels = c("absent", "present")),
+    frace    = factor(frace),
+    mrace    = factor(mrace)
+  ) |>
+  # Remove observations with missing values
+  drop_na()
+
+# Quick check: number of rows after cleaning
+birth_df |>
+  summarize(n = n())
+
+```
+For this problem I first imported the birthweight data from the course website and stored it in a `data/` subfolder. I then cleaned the data by converting several numeric indicator variables to factors: `babysex` and 
+`malform` are binary, and `frace` and `mrace` represent categorical race codes. Finally, I removed observations with missing values so that the regression models can be fit without additional handling of NA’s.
+
+```{r}
+
+# Fit my proposed regression model for birthweight
+fit_main =
+  birth_df |>
+  lm(
+    bwt ~ bhead + blength + gaweeks +
+      babysex + wtgain + ppbmi +
+      smoken + momage + mrace,
+    data = _
+  )
+
+# Tidy model summary (optional preview)
+fit_main |>
+  broom::tidy()
+
+```
+
+I built my main regression model for birthweight using a combination of subject-matter reasoning and simple model building. Birthweight is expected to depend strongly on the baby’s size at birth, gestational age, and the mother’s body size and health behaviors. Therefore I 
+included head circumference (`bhead`), length (`blength`), and gestational age (`gaweeks`) as direct measures of fetal growth, sex of the baby (`babysex`), maternal weight gain during pregnancy (`wtgain`), 
+pre-pregnancy BMI (`ppbmi`), maternal age (`momage`), maternal smoking (`smoken`), and maternal race (`mrace`). This model focuses on main effects that are biologically plausible and avoids high-order interactions to keep the structure interpretable.
+
+```{r}
+
+birth_resid_df =
+  birth_df |>
+  modelr::add_predictions(fit_main) |>
+  modelr::add_residuals(fit_main)
+
+ggplot(birth_resid_df, aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Residuals vs fitted values for main birthweight model",
+    x = "Fitted birthweight (grams)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+```
+
+The residuals versus fitted values plot shows that most residuals are centered around zero with a roughly constant spread across the range of fitted values. There is some funneling at the extremes,which suggests 
+mild heteroscedasticity, but no strong curvature or obvious patterns. Overall the linear model appears to be a reasonable approximation, although inference should still be interpreted with some caution.
+
+```{r}
+
+# Model 1: length and gestational age only (main effects)
+fit_len_age =
+  birth_df |>
+  lm(bwt ~ blength + gaweeks, data = _)
+
+# Model 2: head circumference, length, sex, and all interactions
+fit_head_len_sex =
+  birth_df |>
+  lm(bwt ~ bhead * blength * babysex, data = _)
+
+```
+
+```{r}
+set.seed(1)
+
+# Create Monte Carlo cross-validation splits
+cv_bw =
+  crossv_mc(birth_df, 100)
+
+# Fit the three candidate models within each training set
+cv_bw =
+  cv_bw |>
+  mutate(
+    # main model
+    mod_main = map(train, \(df)
+      lm(
+        bwt ~ bhead + blength + gaweeks +
+          babysex + wtgain + ppbmi +
+          smoken + momage + mrace,
+        data = df
+      )
+    ),
+    # model with length + gestational age
+    mod_len_age = map(train, \(df)
+      lm(bwt ~ blength + gaweeks, data = df)
+    ),
+    # model with head, length, sex, and all interactions
+    mod_head_len_sex = map(train, \(df)
+      lm(bwt ~ bhead * blength * babysex, data = df)
+    )
+  ) |>
+  # Compute RMSE on the corresponding test set
+  mutate(
+    rmse_main = map2_dbl(mod_main, test,
+                         \(mod, df) rmse(model = mod, data = df)),
+    rmse_len_age = map2_dbl(mod_len_age, test,
+                            \(mod, df) rmse(model = mod, data = df)),
+    rmse_head_len_sex = map2_dbl(mod_head_len_sex, test,
+                                 \(mod, df) rmse(model = mod, data = df))
+  )
+
+# Preview the first few RMSE values
+cv_bw |>
+  select(starts_with("rmse_")) |>
+  head()
+
+```
+
+
+```{r}
+
+cv_bw_long =
+  cv_bw |>
+  select(starts_with("rmse_")) |>
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |>
+  mutate(
+    model = fct_inorder(model)
+  )
+
+ggplot(cv_bw_long, aes(x = model, y = rmse)) +
+  geom_violin() +
+  labs(
+    title = "Cross-validated RMSE for three birthweight models",
+    x = "Model",
+    y = "RMSE (grams)"
+  ) +
+  theme_minimal()
+
+```
+
+The cross-validated RMSE results show clear differences in predictive performance across the three birthweight models. The “main” model, which uses a broader set of predictors, consistently yields the lowest RMSE and 
+therefore offers the best out-of-sample prediction accuracy. The model using only length and gestational age performs notably worse, suggesting that these two variables alone do not adequately explain variation in 
+birthweight. The model including head circumference, length, sex, and all interaction terms performs better than the length-only model but still worse than the main model, likely due to overfitting and the added 
+instability introduced by numerous interaction terms. Overall, the results indicate that the more comprehensive main model provides the most reliable predictions of birthweight.
